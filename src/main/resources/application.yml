@@ -1,0 +1,85 @@
+server:
+  port: 8080
+  tomcat:
+    remoteip:
+      remote-ip-header: X-Forwarded-For
+      protocol-header: X-Forwarded-Proto
+  servlet:
+    context-path: /api/v1
+
+environment: "DEV"
+
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+        jdbc:
+          lob:
+            non_contextual_creation: true
+  security:
+    user:
+      name: admin
+      password: admin
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+  admin:
+    password: "sdjnsdjn1232knsdk12223"
+
+  data:
+    mysql:
+      driverClassName: com.mysql.cj.jdbc.Driver
+      username: meettime_user
+      password: meettime_pw
+      database: meettime_db
+      host: localhost
+      port: 3306
+
+    redis:
+      host: localhost
+      port: 6379
+      password: ""
+      ttl: 3600000 # in ms (1 hour)
+
+    s3:
+      accesskey: xxxx # replace with actual access key  - do not commit to repo, remove before committing.
+      secretkey: xxxx # replace with actual secret key  - do not commit to repo, remove before committing.
+      region: eu-central-1
+
+  mail:
+    host: asmtp.bilkent.edu.tr
+    username: no-reply-ims@bilkent.edu.tr
+    password: xxxxx # replace with actual password - do not commit to repo, remove before committing.
+    port: 587
+    properties:
+      mail:
+        smtp:
+          starttls:
+            enable: true
+
+  jwt:
+    access-secret: "123asd123asd"
+    refresh-secret: "123asd123asd"
+    access-ttl: 3600000 # in ms (1 hour)
+    refresh-ttl: 86400000 # in ms (1 day)
+    issuer: "internship-app"
+
+frontend:
+  url: "http://localhost:3000/"
+
+springdoc:
+  user:
+    name: ims-admin
+    password: ims-admin
+  swagger-ui:
+    path: /documentation
+  api-docs:
+    path: /documentation

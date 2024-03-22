@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  db:
+    image: mysql
+    ports:
+      - "3306:3306"
+    volumes:
+      - /var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    networks:
+      - container_network
+    env_file:
+      - .env
+networks:
+  container_network:
+    driver: bridge

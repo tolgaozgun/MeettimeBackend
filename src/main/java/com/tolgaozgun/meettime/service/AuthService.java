@@ -1,141 +1,371 @@
 package com.tolgaozgun.meettime.service;
 
+import java.util.Date;
+import java.util.List;
 import java.util.Optional;
 
-import com.tolgaozgun.meettime.dto.ReqChangePass;
-import com.tolgaozgun.meettime.dto.UserDTO;
-import com.tolgaozgun.meettime.dto.auth.ReqLogin;
-import com.tolgaozgun.meettime.dto.auth.ReqRegister;
-import com.tolgaozgun.meettime.entity.UserEntity;
-import com.tolgaozgun.meettime.exception.BaseException;
-import com.tolgaozgun.meettime.exception.UserAlreadyExistsException;
-import com.tolgaozgun.meettime.exception.UserNotFoundException;
-import com.tolgaozgun.meettime.exception.WrongPasswordException;
-import com.tolgaozgun.meettime.repository.AuthRepository;
+import com.tolgaozgun.meettime.constants.TimeConstants;
+import com.tolgaozgun.meettime.constants.UserConstants;
+import com.tolgaozgun.meettime.dto.*;
+import com.tolgaozgun.meettime.dto.request.auth.ReqLogin;
+import com.tolgaozgun.meettime.dto.request.auth.ReqRegister;
+import com.tolgaozgun.meettime.dto.request.auth.ReqVerifyMailAddress;
+import com.tolgaozgun.meettime.dto.request.user.ReqChangePass;
+import com.tolgaozgun.meettime.dto.request.user.ReqResetPassCode;
+import com.tolgaozgun.meettime.dto.request.user.ReqResetPassVerifyCode;
+import com.tolgaozgun.meettime.dto.request.user.ReqResetPassVerifyPassword;
+import com.tolgaozgun.meettime.entity.ResetPasswordCode;
+import com.tolgaozgun.meettime.entity.User;
+import com.tolgaozgun.meettime.entity.VerifyMailAddressCode;
+import com.tolgaozgun.meettime.entity.enums.UserRole;
+import com.tolgaozgun.meettime.exception.*;
+import com.tolgaozgun.meettime.mapper.UserMapper;
+import com.tolgaozgun.meettime.repository.ResetPasswordRepository;
+import com.tolgaozgun.meettime.repository.UserRepository;
+import com.tolgaozgun.meettime.repository.VerifyMailAddressCodeRepository;
 import com.tolgaozgun.meettime.response.ResRefreshToken;
 import com.tolgaozgun.meettime.response.ResUserToken;
-import com.tolgaozgun.meettime.security.JWTFilter;
-import com.tolgaozgun.meettime.security.JWTUserService;
-import com.tolgaozgun.meettime.security.JWTUtils;
+import com.tolgaozgun.meettime.security.JwtTokenUtil;
+import com.tolgaozgun.meettime.utils.CodeUtils;
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import lombok.RequiredArgsConstructor;
 
 @RequiredArgsConstructor
 @Service
+@Transactional
 public class AuthService {
     public static int hashStrength = 10;
 
     @Autowired
-    final BCryptPasswordEncoder bCryptPasswordEncoder;
+    final PasswordEncoder bCryptPasswordEncoder;
 
-    private final AuthRepository authRepository;
-    private final JWTUserService jwtUserService;
+    private final JwtTokenUtil jwtTokenUtil;
 
-    @Autowired
-    private final JWTUtils jwtUtils;
+
+    private final UserRepository userRepository;
+    private final ResetPasswordRepository resetPasswordRepository;
+    private final VerifyMailAddressCodeRepository verifyMailAddressCodeRepository;
+
+    private final MailService mailService;
+
 
     public ResUserToken login(ReqLogin user) throws BaseException {
-        try {
-            Optional<UserEntity> optionalUser = authRepository.findByEmail(user.getEmail());
+        Optional<User> optionalUser = userRepository.findByEmail(user.getEmail());
 
-            if (optionalUser.isEmpty()) {
-                throw new UserNotFoundException();
-            }
-
-            UserEntity dbUser = optionalUser.get();
-
-            String hashedPassword = dbUser.getPassword();
-            boolean passwordMatch = bCryptPasswordEncoder.matches(user.getPassword(), hashedPassword);
-
-            if (!passwordMatch) {
-                throw new WrongPasswordException();
-            }
-
-            final UserDetails userDetails = jwtUserService.loadUserByUsername(user.getEmail());
-            final String accessToken = jwtUtils.createAccessToken(userDetails);
-            final String refreshToken = jwtUtils.createRefreshToken(userDetails);
-            return new ResUserToken(dbUser, accessToken, refreshToken);
-        } catch (BaseException exception) {
-            throw exception;
+        if (optionalUser.isEmpty()) {
+            throw new UserNotFoundException();
         }
+
+        User dbUser = optionalUser.get();
+
+        String hashedPassword = dbUser.getPassword();
+        boolean passwordMatch = bCryptPasswordEncoder.matches(user.getPassword(), hashedPassword);
+
+        if (!passwordMatch) {
+            throw new WrongPasswordException();
+        }
+
+        final String accessToken = jwtTokenUtil.generateAccessToken(dbUser);
+        final String refreshToken = jwtTokenUtil.generateRefreshToken(dbUser);
+
+        return ResUserToken.builder()
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .user(UserMapper.toDTO(dbUser))
+                .build();
     }
 
-    public ResRefreshToken refreshToken(String auth) throws Exception {
-        try {
-            String username = jwtUtils.extractRefreshUsername(JWTFilter.getTokenWithoutBearer(auth));
+    public void resendEmailVerification() {
+        User user = getCurrentUserEntity();
 
-            final UserDetails userDetails = jwtUserService.loadUserByUsername(username);
-            final String accessToken = jwtUtils.createAccessToken(userDetails);
-            return new ResRefreshToken(accessToken);
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw e;
+        if (user.getEmailVerified()) {
+            throw new EmailAlreadyVerifiedException();
         }
+
+        List<VerifyMailAddressCode> verifyMailAddressCodes =
+                verifyMailAddressCodeRepository.findByUserAndValidAndUsed(
+                        user, true, false
+                );
+
+        for (VerifyMailAddressCode verifyMailAddressCode: verifyMailAddressCodes) {
+            verifyMailAddressCode.setValid(false);
+            verifyMailAddressCode.setUsed(false);
+            verifyMailAddressCode.setExpireDate(new Date());
+            verifyMailAddressCodeRepository.save(verifyMailAddressCode);
+        }
+
+        int code = CodeUtils.generateVerifyEmailCode();
+
+        String hashedCode = bCryptPasswordEncoder.encode(String.valueOf(code));
+
+        VerifyMailAddressCode verifyMailAddressCode =
+                VerifyMailAddressCode.builder()
+                .code(hashedCode)
+                .user(user)
+                .expireDate(new Date(System.currentTimeMillis() +
+                        TimeConstants.SECOND_IN_MS *
+                        TimeConstants.MINUTE_IN_SECONDS *
+                        TimeConstants.VERIFY_MAIL_ADDRESS_TOKEN_EXPIRATION_TIME_IN_MINUTES))
+                .used(false)
+                .build();
+
+        verifyMailAddressCode = verifyMailAddressCodeRepository.save(verifyMailAddressCode);
+
+        VerifyMailAddressDto verifyMailAddressDto = VerifyMailAddressDto.builder()
+                .email(user.getEmail())
+                .name(user.getUsername())
+                .code(code)
+                .build();
+
+        mailService.sendVerifyMailAddressEmail(verifyMailAddressDto);
+
+        return;
     }
 
-    public UserDTO registerUser(ReqRegister reqRegister) throws Exception {
-        try {
-            UserEntity userEntity = addUser(reqRegister);
-            UserDTO userDTO = new UserDTO();
-            userDTO.setEmail(userEntity.getEmail());
-            userDTO.setId(userEntity.getId());
-            return userDTO;
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw e;
-        }
+    public UserDto getCurrentUserDto() {
+        User dbUser = getCurrentUserEntity();
+        return UserMapper.toDTO(dbUser);
     }
 
 
-    protected UserEntity getCurrentUserEntity() {
-        try {
-            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+    public ResRefreshToken refreshToken(HttpServletRequest request, String auth) {
+        if (jwtTokenUtil.hasAuthorizationBearer(request)) {
+            throw new TokenException("No authorization header is present", HttpStatus.UNAUTHORIZED);
+        }
 
-            String userName = authentication.getName();
+        String refreshToken = auth.substring(7);
+        if (!jwtTokenUtil.validateRefreshToken(refreshToken)) {
+            throw new TokenException("Invalid refresh token", HttpStatus.UNAUTHORIZED);
+        }
 
-            Optional<UserEntity> optionalUserEntity = authRepository.findByEmail(userName);
+        // Assuming that 'ResRefreshToken' is a DTO that contains a String 'accessToken'
+//        if (isRefreshTokenExpired(refreshToken)) {
+//            throw new TokenException("Expired refresh token", HttpStatus.UNAUTHORIZED);
+//        }
 
-            if (optionalUserEntity.isEmpty()) {
-                throw new UserNotFoundException();
+        String username = jwtTokenUtil.extractRefreshUsername(refreshToken);
+        Optional<User> user = userRepository.findByUsername(username);
+        if (user.isEmpty()) {
+            throw new UserNotFoundException(HttpStatus.UNAUTHORIZED);
+        }
+
+        String newAccessToken = jwtTokenUtil.generateAccessToken(user.get());
+        return ResRefreshToken.builder()
+                .accessToken(newAccessToken)
+                .build();
+    }
+
+    public UserDto registerUser(ReqRegister reqRegister) {
+        User user = addUser(reqRegister);
+        return UserMapper.toDTO(user);
+    }
+
+    public void requestResetPassword(ReqResetPassCode reqResetPassCode) {
+        String email = reqResetPassCode.getEmail();
+        Optional<User> optionalUser = userRepository.findByEmail(email);
+
+        if (optionalUser.isEmpty()) {
+            throw new UserNotFoundException();
+        }
+
+        User dbUser = optionalUser.get();
+
+        int resetCode = CodeUtils.generateResetPasswordCode();
+
+        ResetPasswordCode resetPasswordCode =
+                ResetPasswordCode.builder()
+                .code(bCryptPasswordEncoder.encode(String.valueOf(resetCode)))
+                .user(dbUser)
+                .expireDate(new Date(System.currentTimeMillis() +
+                        TimeConstants.SECOND_IN_MS *
+                        TimeConstants.MINUTE_IN_SECONDS *
+                        TimeConstants.PASSWORD_RESET_TOKEN_EXPIRATION_TIME_IN_MINUTES))
+                .isUsed(false)
+                .build();
+
+        resetPasswordCode = resetPasswordRepository.save(resetPasswordCode);
+
+        ResetPasswordEmailDto resetPasswordEmailDto =
+                ResetPasswordEmailDto.builder()
+                .email(email)
+                .name(dbUser.getName())
+                .code(resetCode)
+                .build();
+
+        mailService.sendResetPasswordEmail(resetPasswordEmailDto);
+
+        return;
+    }
+
+    public void verifyResetPasswordCode(ReqResetPassVerifyCode reqResetPassVerifyCode) {
+        String email = reqResetPassVerifyCode.getEmail();
+        String code = reqResetPassVerifyCode.getVerifyCode();
+
+        Optional<User> optionalUser = userRepository.findByEmail(email);
+
+        if (optionalUser.isEmpty()) {
+            throw new UserNotFoundException();
+        }
+
+        User dbUser = optionalUser.get();
+
+        Optional<ResetPasswordCode> optionalResetPasswordCode = resetPasswordRepository.findByUser(dbUser);
+
+        if (optionalResetPasswordCode.isEmpty()) {
+            throw new InvalidResetPasswordCodeException();
+        }
+
+        ResetPasswordCode resetPasswordCode = optionalResetPasswordCode.get();
+
+        boolean codeMatch = bCryptPasswordEncoder.matches(code, resetPasswordCode.getCode());
+
+        if (!codeMatch) {
+            throw new InvalidResetPasswordCodeException();
+        }
+
+        if (resetPasswordCode.getExpireDate().before(new Date())) {
+            throw new ResetPasswordCodeExpiredException();
+        }
+
+//        resetPasswordCode.setUsed(true);
+//        resetPasswordRepository.save(resetPasswordCode);
+
+        return;
+    }
+
+    public void verifyMailAddress(ReqVerifyMailAddress reqVerifyMailAddress) {
+        String email = reqVerifyMailAddress.getEmail();
+        String code = reqVerifyMailAddress.getCode();
+
+        Optional<User> optionalUser = userRepository.findByEmail(email);
+
+        if (optionalUser.isEmpty()) {
+            throw new UserNotFoundException();
+        }
+
+        User dbUser = optionalUser.get();
+
+        List<VerifyMailAddressCode> optionalVerifyMailAddressCode =
+                verifyMailAddressCodeRepository.findByUserAndValidAndUsed(
+                        dbUser, true, false
+                );
+
+        boolean isExpired = false;
+
+        for (VerifyMailAddressCode verifyMailAddressCode: optionalVerifyMailAddressCode) {
+            boolean codeMatch = bCryptPasswordEncoder.matches(code, verifyMailAddressCode.getCode());
+
+            if (codeMatch) {
+                if (verifyMailAddressCode.getExpireDate().before(new Date())) {
+                    isExpired = true;
+                    continue;
+                }
+                verifyMailAddressCode.setUsed(true);
+                verifyMailAddressCode = verifyMailAddressCodeRepository.save(verifyMailAddressCode);
+
+                dbUser.setEmailVerified(true);
+                dbUser = userRepository.save(dbUser);
+
+                return;
             }
-
-            return optionalUserEntity.get();
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw e;
         }
+
+        if (isExpired) {
+            throw new VerifyMailAddressCodeExpiredException();
+        }
+
+        throw new InvalidVerifyMailAddressCodeException();
     }
 
-    public boolean changePassword(ReqChangePass reqChangePass) throws Exception {
-        try {
-            UserEntity dbUser = getCurrentUserEntity();
-            String hashedPassword = dbUser.getPassword();
-            String oldPassword = reqChangePass.getOldPassword();
+    public void resetPasswordWithCode(ReqResetPassVerifyPassword reqResetPassVerifyPassword) {
+        String email = reqResetPassVerifyPassword.getEmail();
+        String code = reqResetPassVerifyPassword.getVerifyCode();
+        String newPassword = reqResetPassVerifyPassword.getNewPassword();
 
-            boolean passwordMatch = bCryptPasswordEncoder.matches(oldPassword, hashedPassword);
+        Optional<User> optionalUser = userRepository.findByEmail(email);
 
-            if (!passwordMatch) {
-                throw new WrongPasswordException();
-            }
-
-            String newPassword = reqChangePass.getNewPassword();
-            String hashedNewPassword = bCryptPasswordEncoder.encode(newPassword);
-
-            dbUser.setPassword(hashedNewPassword);
-            boolean result = authRepository.updatePasswordByEmail(hashedNewPassword, dbUser.getEmail());
-
-            return result;
-        } catch (BaseException baseException) {
-            throw baseException;
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw e;
+        if (optionalUser.isEmpty()) {
+            throw new UserNotFoundException();
         }
+
+        User dbUser = optionalUser.get();
+
+        Optional<ResetPasswordCode> optionalResetPasswordCode = resetPasswordRepository.findByUser(dbUser);
+
+        if (optionalResetPasswordCode.isEmpty()) {
+            throw new InvalidResetPasswordCodeException();
+        }
+
+        ResetPasswordCode resetPasswordCode = optionalResetPasswordCode.get();
+        boolean codeMatch = bCryptPasswordEncoder.matches(code, resetPasswordCode.getCode());
+
+        if (!codeMatch) {
+            throw new InvalidResetPasswordCodeException();
+        }
+
+        if (resetPasswordCode.getExpireDate().before(new Date())) {
+            throw new ResetPasswordCodeExpiredException();
+        }
+
+        String hashedNewPassword = bCryptPasswordEncoder.encode(newPassword);
+
+        dbUser.setPassword(hashedNewPassword);
+        userRepository.save(dbUser);
+
+        resetPasswordCode.setUsed(true);
+        resetPasswordCode = resetPasswordRepository.save(resetPasswordCode);
+
+        return;
+    }
+
+    protected User getCurrentUserEntity() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+        String userName = authentication.getName();
+
+        Optional<User> optionalUserEntity = userRepository.findByEmail(userName);
+
+        if (optionalUserEntity.isEmpty()) {
+            throw new UserNotFoundException();
+        }
+
+        return optionalUserEntity.get();
+    }
+
+    public boolean changePassword(ReqChangePass reqChangePass) {
+        User dbUser = getCurrentUserEntity();
+        String hashedPassword = dbUser.getPassword();
+        String oldPassword = reqChangePass.getOldPassword();
+
+        boolean passwordMatch = bCryptPasswordEncoder.matches(oldPassword, hashedPassword);
+
+        if (!passwordMatch) {
+            throw new WrongPasswordException();
+        }
+
+        String newPassword = reqChangePass.getNewPassword();
+        String hashedNewPassword = bCryptPasswordEncoder.encode(newPassword);
+
+        dbUser.setPassword(hashedNewPassword);
+        dbUser = userRepository.save(dbUser);
+
+        return true;
+    }
+
+    public void logout() {
+        User user = getCurrentUserEntity();
+
+
+        // TODO: Implement revoking accessToken and refreshToken
+
     }
 
     /**
@@ -144,36 +374,67 @@ public class AuthService {
      *
      * @param reqRegister request body
      * @return UserEntity
-     * @throws Exception
      */
-    public UserEntity addUser(ReqRegister reqRegister) throws Exception {
-        try {
-            String email = reqRegister.getEmail();
-            String password = reqRegister.getPassword();
+    private User addUser(ReqRegister reqRegister) {
+        String email = reqRegister.getEmail();
+        String password = reqRegister.getPassword();
+        String username = reqRegister.getUsername();
+        String name = reqRegister.getName();
 
-            boolean userExist = authRepository.existsByEmail(email);
+        boolean userExist = userRepository.existsByEmail(email);
 
-            if (userExist) {
-                throw new UserAlreadyExistsException("User with this email already exists");
-            } else {
-                UserEntity userEntity = new UserEntity();
-                userEntity.setEmail(email);
-                userEntity.setPassword(password);
-                // generate uuid and hash password if user does not exist in the system
-
-                return authRepository.save(userEntity);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw e;
+        if (userExist) {
+            throw new UserAlreadyExistsException("User with this email already exists");
         }
+
+        userExist = userRepository.existsByUsername(username);
+
+        if (userExist) {
+            throw new UserAlreadyExistsException("User with this username already exists");
+        }
+
+
+
+        User user = User.builder()
+                .username(username)
+                .email(email)
+                .name(name)
+                .picture(UserConstants.DEFAULT_PROFILE_IMAGE)
+                .role(UserRole.REGISTERED_USER)
+                .emailVerified(false)
+                .password(encodePassword(password))
+                .build();
+
+        user = userRepository.save(user);
+
+        int code = CodeUtils.generateVerifyEmailCode();
+
+        String hashedCode = bCryptPasswordEncoder.encode(String.valueOf(code));
+
+        VerifyMailAddressCode verifyMailAddressCode =
+                VerifyMailAddressCode.builder()
+                .code(hashedCode)
+                .user(user)
+                .expireDate(new Date(System.currentTimeMillis() +
+                        TimeConstants.SECOND_IN_MS *
+                        TimeConstants.MINUTE_IN_SECONDS *
+                        TimeConstants.VERIFY_MAIL_ADDRESS_TOKEN_EXPIRATION_TIME_IN_MINUTES))
+                .used(false)
+                .build();
+        verifyMailAddressCode = verifyMailAddressCodeRepository.save(verifyMailAddressCode);
+
+
+        VerifyMailAddressDto verifyMailAddressDto = VerifyMailAddressDto.builder()
+                .email(email)
+                .name(username)
+                .code(code)
+                .build();
+
+        mailService.sendVerifyMailAddressEmail(verifyMailAddressDto);
+        return user;
     }
 
     private String encodePassword(String plainPassword) {
-        try {
-            return bCryptPasswordEncoder.encode(plainPassword);
-        } catch (Exception e) {
-            throw e;
-        }
+        return bCryptPasswordEncoder.encode(plainPassword);
     }
 }
